@@ -1,0 +1,185 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
+export type BashMode = "off" | "safe" | "full";
+export type WriteMode = "off" | "handoff" | "workspace";
+
+export interface CodexProConfig {
+  defaultRoot: string;
+  allowedRoots: string[];
+  host: string;
+  port: number;
+  authToken?: string;
+  bashMode: BashMode;
+  writeMode: WriteMode;
+  inheritEnv: boolean;
+  maxReadBytes: number;
+  maxWriteBytes: number;
+  maxOutputBytes: number;
+  maxSearchResults: number;
+  blockedGlobs: string[];
+  contextDir: string;
+}
+
+const DEFAULT_BLOCKED_GLOBS = [
+  ".git",
+  ".git/**",
+  "**/.git/**",
+  "node_modules",
+  "node_modules/**",
+  "**/node_modules/**",
+  ".env",
+  ".env.*",
+  "**/.env",
+  "**/.env.*",
+  "**/*.pem",
+  "**/*.key",
+  "**/id_rsa",
+  "**/id_rsa.*",
+  "**/id_ed25519",
+  "**/id_ed25519.*",
+  "**/.ssh/**",
+  "dist",
+  "dist/**",
+  "**/dist/**",
+  "build",
+  "build/**",
+  "**/build/**",
+  ".next",
+  ".next/**",
+  "**/.next/**",
+  "coverage",
+  "coverage/**",
+  "**/coverage/**",
+  ".cache",
+  ".cache/**",
+  "**/.cache/**"
+];
+
+function parseArgs(argv: string[]): Record<string, string | string[] | boolean> {
+  const out: Record<string, string | string[] | boolean> = {};
+  for (let i = 0; i < argv.length; i += 1) {
+    const raw = argv[i];
+    if (!raw.startsWith("--")) continue;
+    const withoutPrefix = raw.slice(2);
+    const eqIndex = withoutPrefix.indexOf("=");
+    let key: string;
+    let value: string | boolean;
+    if (eqIndex >= 0) {
+      key = withoutPrefix.slice(0, eqIndex);
+      value = withoutPrefix.slice(eqIndex + 1);
+    } else {
+      key = withoutPrefix;
+      const next = argv[i + 1];
+      if (next && !next.startsWith("--")) {
+        value = next;
+        i += 1;
+      } else {
+        value = true;
+      }
+    }
+
+    if (key === "allow-root") {
+      const prev = out[key];
+      if (Array.isArray(prev)) prev.push(String(value));
+      else if (prev) out[key] = [String(prev), String(value)];
+      else out[key] = [String(value)];
+    } else {
+      out[key] = value;
+    }
+  }
+  return out;
+}
+
+export function expandHome(input: string): string {
+  if (!input || input === "~") return os.homedir();
+  if (input.startsWith("~/")) return path.join(os.homedir(), input.slice(2));
+  return input;
+}
+
+function splitList(value: string | undefined, delimiter: string = path.delimiter): string[] {
+  if (!value) return [];
+  return value
+    .split(delimiter)
+    .map((part) => part.trim())
+    .filter(Boolean);
+}
+
+function splitRoots(value: string | undefined): string[] {
+  return splitList(value, path.delimiter);
+}
+
+function toRealDir(input: string): string {
+  const expanded = expandHome(input);
+  const resolved = path.resolve(expanded);
+  if (!fs.existsSync(resolved)) {
+    throw new Error(`Directory does not exist: ${resolved}`);
+  }
+  const stat = fs.statSync(resolved);
+  if (!stat.isDirectory()) {
+    throw new Error(`Not a directory: ${resolved}`);
+  }
+  return fs.realpathSync(resolved);
+}
+
+function numberFrom(value: string | undefined, fallback: number, min: number, max: number): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(min, Math.min(max, Math.floor(parsed)));
+}
+
+function bashModeFrom(value: string | undefined): BashMode {
+  if (value === "off" || value === "safe" || value === "full") return value;
+  return "safe";
+}
+
+function writeModeFrom(value: string | undefined): WriteMode {
+  if (value === "off" || value === "handoff" || value === "workspace") return value;
+  return "workspace";
+}
+
+export function loadConfig(argv = process.argv.slice(2)): CodexProConfig {
+  const args = parseArgs(argv);
+
+  const rootFromArgs = typeof args.root === "string" ? args.root : undefined;
+  const root = rootFromArgs ?? process.env.CODEXPRO_ROOT ?? process.env.CODEBASE_BRIDGE_REPO_ROOT ?? process.cwd();
+  const defaultRoot = toRealDir(root);
+
+  const allowRootArgs = Array.isArray(args["allow-root"])
+    ? args["allow-root"]
+    : typeof args["allow-root"] === "string"
+      ? [args["allow-root"]]
+      : [];
+  const envAllowedRoots = [
+    ...splitRoots(process.env.CODEXPRO_ALLOWED_ROOTS),
+    ...splitRoots(process.env.CODEBASE_BRIDGE_ALLOWED_ROOTS)
+  ];
+
+  const allowHome = process.env.CODEXPRO_ALLOW_HOME === "1" || args["allow-home"] === true;
+  const requestedAllowed = [defaultRoot, ...allowRootArgs, ...envAllowedRoots, ...(allowHome ? [os.homedir()] : [])];
+  const allowedRoots = [...new Set(requestedAllowed.map(toRealDir))];
+
+  const portArg = typeof args.port === "string" ? args.port : undefined;
+  const hostArg = typeof args.host === "string" ? args.host : undefined;
+  const bashArg = typeof args.bash === "string" ? args.bash : undefined;
+  const writeArg = typeof args.write === "string" ? args.write : undefined;
+  const extraBlockedGlobs = splitList(process.env.CODEXPRO_BLOCKED_GLOBS, ",");
+
+  return {
+    defaultRoot,
+    allowedRoots,
+    host: hostArg ?? process.env.HOST ?? process.env.CODEXPRO_HOST ?? "127.0.0.1",
+    port: numberFrom(portArg ?? process.env.PORT ?? process.env.CODEXPRO_PORT, 8787, 1, 65535),
+    authToken: process.env.CODEXPRO_HTTP_TOKEN ?? process.env.CODEBASE_BRIDGE_HTTP_TOKEN,
+    bashMode: bashModeFrom(bashArg ?? process.env.CODEXPRO_BASH_MODE),
+    writeMode: writeModeFrom(writeArg ?? process.env.CODEXPRO_WRITE_MODE),
+    inheritEnv: process.env.CODEXPRO_INHERIT_ENV === "1",
+    maxReadBytes: numberFrom(process.env.CODEXPRO_MAX_READ_BYTES, 180_000, 4_000, 2_000_000),
+    maxWriteBytes: numberFrom(process.env.CODEXPRO_MAX_WRITE_BYTES, 1_000_000, 1_000, 10_000_000),
+    maxOutputBytes: numberFrom(process.env.CODEXPRO_MAX_OUTPUT_BYTES, 120_000, 4_000, 2_000_000),
+    maxSearchResults: numberFrom(process.env.CODEXPRO_MAX_SEARCH_RESULTS, 200, 5, 2_000),
+    blockedGlobs: [...DEFAULT_BLOCKED_GLOBS, ...extraBlockedGlobs],
+    contextDir: process.env.CODEXPRO_CONTEXT_DIR ?? ".ai-bridge"
+  };
+}
