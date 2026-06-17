@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.28.0
+
+- Added `codexpro execute-handoff` as an opt-in local executor for `.ai-bridge/current-plan.md`.
+- Added built-in local adapters for `opencode`, `pi`, and `codex`, plus a restricted `--command` template path for custom agents.
+- Added `--dry-run`, `--yes`, timeout handling, stdout/stderr capture, `agent-status.md`, `implementation-diff.patch`, and `execution-log.jsonl` output.
+- Kept `handoff_to_agent` planning-only; local execution is not exposed as a remote MCP tool.
+- Added smoke coverage for dry-run previews, custom command validation, execution status, diff collection, and structured execution logging.
+
 ## 0.27.2
 
 - Added `handoff_to_agent` for file-based handoffs to Codex, OpenCode, Pi, or custom local implementation agents without executing local commands.

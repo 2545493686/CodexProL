@@ -113,6 +113,10 @@ CodexPro does not bypass, increase, or modify ChatGPT, Codex, or OpenAI rate lim
 - `handoff_to_agent` — write `.ai-bridge/current-plan.md` for Codex, OpenCode, Pi, or a custom local implementation agent without executing local commands.
 - `handoff_to_codex` — compatibility wrapper for `handoff_to_agent` with `agent=codex`.
 
+Local-only companion command:
+
+- `codexpro execute-handoff` — run a previously written `.ai-bridge/current-plan.md` through a local agent, then collect status, logs, and git diff. This is intentionally a CLI command, not a remote MCP tool.
+
 ## Visual ChatGPT cards
 
 v0.8+ registers a reusable Apps SDK widget resource:
@@ -446,13 +450,58 @@ In handoff mode, ChatGPT can create a plan for a local implementation agent with
 .ai-bridge/execution-log.jsonl
 ```
 
-Then run your local agent manually against `.ai-bridge/current-plan.md`, for example:
+Then run the implementation locally with `codexpro execute-handoff`:
+
+```bash
+codexpro execute-handoff --agent opencode --model provider/cheap-model
+```
+
+Dry-run first if you want to inspect the exact command:
+
+```bash
+codexpro execute-handoff --agent opencode --model provider/cheap-model --dry-run
+```
+
+Pi adapter:
+
+```bash
+codexpro execute-handoff --agent pi --model provider/cheap-model
+```
+
+Custom adapter:
+
+```bash
+codexpro execute-handoff \
+  --agent custom \
+  --command "my-agent --model {{model}} --task-file {{plan_file}}" \
+  --model provider/cheap-model
+```
+
+Template placeholders:
+
+```text
+{{model}}      model passed with --model
+{{plan_file}}  absolute path to .ai-bridge/current-plan.md
+{{plan_text}}  full plan text as one argument
+{{root}}       workspace root
+```
+
+By default, `execute-handoff` asks for local confirmation before running. Use `--yes` only in trusted scripts. After execution, CodexPro writes:
+
+```text
+.ai-bridge/agent-status.md
+.ai-bridge/implementation-diff.patch
+.ai-bridge/execution-log.jsonl
+```
+
+Then let ChatGPT review those files through `read_handoff` or `codex_context`.
+
+Manual fallback:
 
 ```bash
 opencode run --model provider/cheap-model "$(cat .ai-bridge/current-plan.md)"
+git diff --no-ext-diff -- > .ai-bridge/implementation-diff.patch
 ```
-
-Have the implementation agent update `.ai-bridge/agent-status.md`, write the final review diff to `.ai-bridge/implementation-diff.patch` when practical, and then let ChatGPT review those files through `read_handoff` or `codex_context`.
 
 For debugging whether ChatGPT is actually reaching the local server, add:
 

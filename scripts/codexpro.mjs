@@ -21,6 +21,7 @@ Usage:
   codexpro start --root /path/to/repo
   codexpro settings
   codexpro doctor
+  codexpro execute-handoff --agent opencode --model provider/model
   codexpro --root /path/to/repo
   codexpro ngrok --hostname your-domain.ngrok-free.dev
   codexpro stable --hostname codexpro.example.com --tunnel-name codexpro
@@ -80,6 +81,20 @@ Options:
   --print-env               Print the environment used to launch the server.
   --help                    Show this message.
 
+Execute handoff options:
+  codexpro execute-handoff --agent opencode --model provider/model
+  codexpro execute-handoff --agent pi --model provider/model
+  codexpro execute-handoff --agent custom --command "my-agent --task-file {{plan_file}}"
+  --agent <opencode|pi|codex|custom>
+                             Local implementation agent adapter.
+  --model <provider/model>  Optional model name passed to the adapter.
+  --command <template>      Custom command template. Supports {{model}}, {{plan_file}}, {{plan_text}}, {{root}}.
+  --dry-run                 Print the command that would run without executing it.
+  --timeout-ms <ms>         Execution timeout. Default: 600000.
+  --max-output-bytes <n>    Max stdout/stderr excerpt bytes per stream. Default: 120000.
+  --context-dir <dir>       Handoff directory. Default: .ai-bridge.
+  --yes                     Run without interactive confirmation.
+
 Default agent mode:
   codexpro start --root /path/to/repo
 
@@ -102,6 +117,11 @@ Ngrok stable URL mode:
 
 Planning-only handoff mode:
   codexpro start --root /path/to/repo --mode handoff
+
+Execute a local handoff after ChatGPT writes .ai-bridge/current-plan.md:
+  codexpro execute-handoff --agent opencode --model provider/model
+  codexpro execute-handoff --agent pi --model provider/model
+  codexpro execute-handoff --agent custom --command "node ./agent.js --task-file {{plan_file}}" --yes
 
 Stable URL mode after one-time Cloudflare tunnel setup:
   codexpro stable --root /path/to/repo --hostname codexpro.example.com --tunnel-name codexpro
@@ -210,6 +230,7 @@ function parseArgs(argv) {
     else if (key === 'no-auth') out.noAuth = true;
     else if (key === 'copy-url') out.copyUrl = true;
     else if (key === 'no-copy-url') out.noCopyUrl = true;
+    else if (key === 'dry-run') out.dryRun = true;
     else if (key === 'open-chatgpt') out.openChatgpt = true;
     else if (key === 'no-profile') out.noProfile = true;
     else if (key === 'save-config') out.saveConfig = true;
@@ -218,7 +239,15 @@ function parseArgs(argv) {
     else if (key === 'stable') out.tunnel = 'cloudflare-named';
     else if (key === 'install-cloudflared') out.installCloudflared = true;
     else if (key === 'no-install-cloudflared') out.noInstallCloudflared = true;
-    else if (key === 'agent') out.mode = 'agent';
+    else if (key === 'agent') {
+      const next = argv[i + 1];
+      if (next && !next.startsWith('--')) {
+        out.agent = next;
+        i += 1;
+      } else {
+        out.mode = 'agent';
+      }
+    }
     else if (key === 'handoff') out.mode = 'handoff';
     else if (key === 'pro-planning' || key === 'pro') out.mode = 'pro';
     else if (key === 'log-requests') out.logRequests = true;
@@ -276,6 +305,13 @@ function executableFileExists(filePath) {
 function commandAvailable(command) {
   if (isPathLike(command)) return executableFileExists(resolveExecutablePath(command));
   return commandExists(command);
+}
+
+function commandAvailableFromRoot(command, root) {
+  if (!isPathLike(command)) return commandExists(command);
+  const expanded = expandHome(command);
+  const resolved = path.isAbsolute(expanded) ? path.resolve(expanded) : path.resolve(root, expanded);
+  return executableFileExists(resolved);
 }
 
 function codexProHome() {
@@ -781,6 +817,373 @@ async function waitForPublicHealth(publicBase, token, tunnelChild, tunnelLabel =
     throw new Error(`${tunnelLabel} exited before ${publicBase}/healthz was reachable, code=${code} signal=${signal}`);
   });
   return Promise.race([health, exit]);
+}
+
+function isSubpath(child, parent) {
+  const relative = path.relative(parent, child);
+  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+}
+
+function contextDirFromArgs(args) {
+  return args.contextDir ?? process.env.CODEXPRO_CONTEXT_DIR ?? '.ai-bridge';
+}
+
+function resolveWorkspaceFile(root, relativePath) {
+  const absPath = path.resolve(root, relativePath);
+  if (!isSubpath(absPath, root)) {
+    throw new Error(`Path escapes workspace root: ${relativePath}`);
+  }
+  return absPath;
+}
+
+function readTextFileBounded(filePath, maxBytes) {
+  const stat = fs.statSync(filePath);
+  if (!stat.isFile()) throw new Error(`Not a file: ${filePath}`);
+  if (stat.size > maxBytes) throw new Error(`File is too large (${stat.size} bytes). Limit: ${maxBytes} bytes.`);
+  const sample = fs.readFileSync(filePath, { encoding: null });
+  if (sample.includes(0)) throw new Error(`Refusing to read binary file: ${filePath}`);
+  return sample.toString('utf8');
+}
+
+function numberOption(value, fallback, min, max) {
+  const parsed = Number(value ?? fallback);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(min, Math.min(max, Math.floor(parsed)));
+}
+
+function shellCommandPreview(parts) {
+  return parts.map((part) => {
+    const text = String(part);
+    if (/^[A-Za-z0-9_./:@=+-]+$/.test(text)) return text;
+    return `'${text.replace(/'/g, "'\\''")}'`;
+  }).join(' ');
+}
+
+function redactForLog(value) {
+  return String(value)
+    .replace(/\bsk-[A-Za-z0-9_-]{10,}\b/g, '[REDACTED_SECRET]')
+    .replace(/\b[A-Za-z0-9_]*(?:API[_-]?KEY|TOKEN|SECRET|PASSWORD|PRIVATE[_-]?KEY)[A-Za-z0-9_]*\s*=\s*(?:"[^"\r\n]{12,}"|'[^'\r\n]{12,}'|`[^`\r\n]{12,}`|[A-Za-z0-9_./+=-]{20,})/gi, (match) => {
+      const index = match.indexOf('=');
+      return index < 0 ? '[REDACTED_SECRET]' : `${match.slice(0, index).trimEnd()}= [REDACTED_SECRET]`;
+    });
+}
+
+function trimBytes(value, maxBytes) {
+  const redacted = redactForLog(value);
+  const buffer = Buffer.from(redacted, 'utf8');
+  if (buffer.byteLength <= maxBytes) return { text: redacted, truncated: false };
+  return {
+    text: `${buffer.subarray(0, maxBytes).toString('utf8')}\n...[output truncated to ${maxBytes} bytes]`,
+    truncated: true
+  };
+}
+
+function splitCommandTemplate(input) {
+  const tokens = [];
+  let current = '';
+  let quote = '';
+  let escaping = false;
+  for (const char of String(input)) {
+    if (escaping) {
+      current += char;
+      escaping = false;
+      continue;
+    }
+    if (char === '\\') {
+      escaping = true;
+      continue;
+    }
+    if (quote) {
+      if (char === quote) quote = '';
+      else current += char;
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      quote = char;
+      continue;
+    }
+    if (/\s/.test(char)) {
+      if (current) {
+        tokens.push(current);
+        current = '';
+      }
+      continue;
+    }
+    current += char;
+  }
+  if (escaping) current += '\\';
+  if (quote) throw new Error('Custom command has an unterminated quote.');
+  if (current) tokens.push(current);
+  return tokens;
+}
+
+function applyCommandTemplate(value, replacements) {
+  return String(value).replace(/\{\{\s*(model|plan_file|plan_text|root)\s*\}\}/g, (_, key) => replacements[key] ?? '');
+}
+
+function buildExecutorCommand(args, root, planPath, planText) {
+  const agent = String(args.agent ?? 'opencode').trim().toLowerCase();
+  const model = String(args.model ?? process.env.CODEXPRO_AGENT_MODEL ?? '').trim();
+  const replacements = {
+    model,
+    plan_file: planPath,
+    plan_text: planText,
+    root
+  };
+
+  if (args.command) {
+    const template = String(args.command);
+    if (!/\{\{\s*(plan_file|plan_text)\s*\}\}/.test(template)) {
+      throw new Error('Custom --command must include {{plan_file}} or {{plan_text}} so the agent receives the handoff.');
+    }
+    const parts = splitCommandTemplate(template).map((part) => applyCommandTemplate(part, replacements));
+    const displayParts = splitCommandTemplate(template).map((part) => applyCommandTemplate(part, { ...replacements, plan_text: '<plan_text>' }));
+    if (!parts.length) throw new Error('Custom --command is empty.');
+    return { agent, model, command: parts[0], args: parts.slice(1), displayArgs: displayParts.slice(1), custom: true };
+  }
+
+  if (agent === 'opencode') {
+    return {
+      agent,
+      model,
+      command: 'opencode',
+      args: ['run', ...(model ? ['--model', model] : []), planText],
+      displayArgs: ['run', ...(model ? ['--model', model] : []), '<plan_text>'],
+      custom: false
+    };
+  }
+  if (agent === 'pi') {
+    return {
+      agent,
+      model,
+      command: 'pi',
+      args: [...(model ? ['--model', model] : []), '-p', planText],
+      displayArgs: [...(model ? ['--model', model] : []), '-p', '<plan_text>'],
+      custom: false
+    };
+  }
+  if (agent === 'codex') {
+    return {
+      agent,
+      model,
+      command: 'codex',
+      args: ['exec', ...(model ? ['--model', model] : []), planText],
+      displayArgs: ['exec', ...(model ? ['--model', model] : []), '<plan_text>'],
+      custom: false
+    };
+  }
+  if (agent === 'custom') {
+    throw new Error('Custom agent execution requires --command.');
+  }
+  throw new Error(`Unsupported --agent ${agent}. Use opencode, pi, codex, or custom with --command.`);
+}
+
+function executorCommandPreview(commandInfo) {
+  return shellCommandPreview([commandInfo.command, ...(commandInfo.displayArgs ?? commandInfo.args)]);
+}
+
+function runProcessCaptured(command, args, options) {
+  const timeoutMs = options.timeoutMs;
+  const maxOutputBytes = options.maxOutputBytes;
+  const started = Date.now();
+  return new Promise((resolve) => {
+    const child = spawn(command, args, {
+      cwd: options.cwd,
+      env: { ...process.env, NO_COLOR: '1' },
+      stdio: ['ignore', 'pipe', 'pipe'],
+      shell: false
+    });
+    let stdout = '';
+    let stderr = '';
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill('SIGTERM');
+      setTimeout(() => {
+        if (!child.killed) child.kill('SIGKILL');
+      }, 1500).unref();
+    }, timeoutMs);
+    timer.unref();
+
+    child.stdout.on('data', (chunk) => {
+      stdout += String(chunk);
+      if (Buffer.byteLength(stdout, 'utf8') > maxOutputBytes * 2) child.kill('SIGTERM');
+    });
+    child.stderr.on('data', (chunk) => {
+      stderr += String(chunk);
+      if (Buffer.byteLength(stderr, 'utf8') > maxOutputBytes * 2) child.kill('SIGTERM');
+    });
+    child.on('error', (error) => {
+      clearTimeout(timer);
+      resolve({
+        exitCode: 127,
+        signal: null,
+        durationMs: Date.now() - started,
+        timedOut,
+        stdout: '',
+        stderr: error instanceof Error ? error.message : String(error),
+        spawnError: true
+      });
+    });
+    child.on('close', (exitCode, signal) => {
+      clearTimeout(timer);
+      const out = trimBytes(stdout, maxOutputBytes);
+      const err = trimBytes(`${stderr}${timedOut ? `\n[codexpro] Command timed out after ${timeoutMs} ms.` : ''}`, maxOutputBytes);
+      resolve({
+        exitCode,
+        signal,
+        durationMs: Date.now() - started,
+        timedOut,
+        stdout: out.text,
+        stderr: err.text,
+        truncated: out.truncated || err.truncated,
+        spawnError: false
+      });
+    });
+  });
+}
+
+function readGitDiff(root, maxBytes) {
+  const result = spawnSync('git', ['diff', '--no-ext-diff', '--'], {
+    cwd: root,
+    encoding: 'utf8',
+    maxBuffer: Math.max(maxBytes * 2, 1_000_000),
+    shell: false
+  });
+  if (result.status !== 0) {
+    const reason = result.stderr || result.stdout || `git diff exited ${result.status}`;
+    return `# git diff unavailable\n\n${redactForLog(reason).trim()}\n`;
+  }
+  const diff = result.stdout || '';
+  if (!diff.trim()) return '';
+  return trimBytes(diff, maxBytes).text;
+}
+
+function codeBlock(label, value) {
+  return `## ${label}\n\n\`\`\`text\n${String(value || '').replace(/```/g, '`\\`\\`') || '(empty)'}\n\`\`\`\n`;
+}
+
+function writeExecutionOutputs(root, contextDir, commandInfo, result, diffText) {
+  const bridgeDir = resolveWorkspaceFile(root, contextDir);
+  fs.mkdirSync(bridgeDir, { recursive: true, mode: 0o700 });
+  const statusPath = path.join(bridgeDir, 'agent-status.md');
+  const diffPath = path.join(bridgeDir, 'implementation-diff.patch');
+  const logPath = path.join(bridgeDir, 'execution-log.jsonl');
+  const commandText = executorCommandPreview(commandInfo);
+  const status = [
+    '# Agent Execution Status',
+    '',
+    `Updated: ${new Date().toISOString()}`,
+    `Agent: ${commandInfo.agent}`,
+    commandInfo.model ? `Model: ${commandInfo.model}` : '',
+    `Command: ${commandText}`,
+    `Exit code: ${result.exitCode ?? 'null'}`,
+    result.signal ? `Signal: ${result.signal}` : '',
+    `Timed out: ${result.timedOut ? 'yes' : 'no'}`,
+    `Duration: ${result.durationMs} ms`,
+    `Diff path: ${path.posix.join(contextDir, 'implementation-diff.patch')}`,
+    `Execution log: ${path.posix.join(contextDir, 'execution-log.jsonl')}`,
+    '',
+    codeBlock('Stdout excerpt', result.stdout),
+    codeBlock('Stderr excerpt', result.stderr)
+  ].filter(Boolean).join('\n');
+  fs.writeFileSync(statusPath, status, { mode: 0o600 });
+  fs.writeFileSync(diffPath, diffText || '', { mode: 0o600 });
+  const logEvent = {
+    ts: new Date().toISOString(),
+    event: 'execute_handoff',
+    agent: commandInfo.agent,
+    model: commandInfo.model || undefined,
+    command: commandText,
+    exit_code: result.exitCode,
+    signal: result.signal,
+    timed_out: result.timedOut,
+    duration_ms: result.durationMs,
+    stdout_excerpt: result.stdout,
+    stderr_excerpt: result.stderr,
+    diff_path: path.posix.join(contextDir, 'implementation-diff.patch'),
+    status_path: path.posix.join(contextDir, 'agent-status.md')
+  };
+  fs.appendFileSync(logPath, `${JSON.stringify(logEvent)}\n`, { mode: 0o600 });
+  return { statusPath, diffPath, logPath };
+}
+
+async function confirmLocalExecution(args, root, commandInfo) {
+  if (args.yes) return true;
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    throw new Error('Use --yes to execute a local handoff in non-interactive shells, or use --dry-run to preview.');
+  }
+  printBox('Confirm local execution', [
+    labelValue('Workspace', root),
+    labelValue('Agent', commandInfo.agent),
+    ...(commandInfo.model ? [labelValue('Model', commandInfo.model)] : []),
+    labelValue('Command', executorCommandPreview(commandInfo)),
+    'This runs a local process in the workspace. CodexPro will collect status, logs, and git diff into .ai-bridge.'
+  ]);
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    const answer = await ask(rl, 'Run this local agent now?', 'no');
+    return ['y', 'yes'].includes(answer.trim().toLowerCase());
+  } finally {
+    rl.close();
+  }
+}
+
+async function runExecuteHandoff(argv) {
+  const args = parseArgs(argv);
+  if (args.help) {
+    usage();
+    return;
+  }
+  const root = realDir(args.root ?? process.env.CODEXPRO_ROOT ?? process.cwd());
+  const contextDir = contextDirFromArgs(args);
+  const bridgeDir = resolveWorkspaceFile(root, contextDir);
+  const planPath = path.join(bridgeDir, 'current-plan.md');
+  const maxReadBytes = numberOption(process.env.CODEXPRO_MAX_READ_BYTES, 180_000, 4_000, 2_000_000);
+  const maxOutputBytes = numberOption(args.maxOutputBytes ?? process.env.CODEXPRO_MAX_OUTPUT_BYTES, 120_000, 4_000, 2_000_000);
+  const timeoutMs = numberOption(args.timeoutMs ?? args.timeout, 600_000, 1_000, 24 * 60 * 60_000);
+  if (!fs.existsSync(planPath)) {
+    throw new Error(`No handoff plan found at ${path.relative(root, planPath)}. Ask ChatGPT to call handoff_to_agent first.`);
+  }
+  const planText = readTextFileBounded(planPath, maxReadBytes);
+  const commandInfo = buildExecutorCommand(args, root, planPath, planText);
+  const commandText = executorCommandPreview(commandInfo);
+
+  if (args.dryRun) {
+    printBox('CodexPro execute-handoff dry run', [
+      labelValue('Workspace', root),
+      labelValue('Plan', path.relative(root, planPath)),
+      labelValue('Agent', commandInfo.agent),
+      ...(commandInfo.model ? [labelValue('Model', commandInfo.model)] : []),
+      labelValue('Command', commandText),
+      'No command was executed and no .ai-bridge result files were changed.'
+    ]);
+    return;
+  }
+
+  const confirmed = await confirmLocalExecution(args, root, commandInfo);
+  if (!confirmed) {
+    statusLine('warn', 'Execution cancelled.');
+    return;
+  }
+
+  if (!commandAvailableFromRoot(commandInfo.command, root)) {
+    throw new Error(`${commandInfo.command} was not found. Install it, add it to PATH, pass an absolute path, or use --command.`);
+  }
+
+  statusLine('wait', `Running ${commandInfo.agent}: ${commandText}`);
+  const result = await runProcessCaptured(commandInfo.command, commandInfo.args, {
+    cwd: root,
+    timeoutMs,
+    maxOutputBytes
+  });
+  const diffText = readGitDiff(root, maxOutputBytes);
+  const outputs = writeExecutionOutputs(root, contextDir, commandInfo, result, diffText);
+  statusLine(result.exitCode === 0 ? 'ok' : 'warn', `Agent exited with code ${result.exitCode ?? 'null'}${result.signal ? ` signal=${result.signal}` : ''}`);
+  console.log(`Status: ${path.relative(root, outputs.statusPath)}`);
+  console.log(`Diff:   ${path.relative(root, outputs.diffPath)}`);
+  console.log(`Log:    ${path.relative(root, outputs.logPath)}`);
+  if (result.exitCode && result.exitCode !== 0) process.exitCode = result.exitCode;
 }
 
 function createConnectorDetails(endpoint, token, localBase = '') {
@@ -1626,6 +2029,10 @@ async function main() {
   }
   if (subcommand === 'settings' || subcommand === 'config') {
     await runSettings(argv.slice(1));
+    return;
+  }
+  if (subcommand === 'execute-handoff' || subcommand === 'execute' || subcommand === 'run-handoff') {
+    await runExecuteHandoff(argv.slice(1));
     return;
   }
   if (subcommand === 'pro-bundle' || subcommand === 'bundle') {

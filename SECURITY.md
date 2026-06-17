@@ -21,6 +21,7 @@ CodexPro can expose:
 - `.ai-bridge` planning files
 - optional shell command execution through the `bash` tool
 - optional write/edit capability depending on `CODEXPRO_WRITE_MODE`
+- optional local handoff execution through `codexpro execute-handoff`, run from the user's terminal only
 
 The main risks are:
 
@@ -28,6 +29,7 @@ The main risks are:
 - exposing the server through a public tunnel without auth
 - running with `CODEXPRO_BASH_MODE=full`
 - running with `CODEXPRO_WRITE_MODE=workspace` on an important repo
+- executing an untrusted `.ai-bridge/current-plan.md` or custom `execute-handoff --command`
 - adding overly broad allowed roots
 - leaking a `codexpro_token` or Cloudflare tunnel token
 - trusting a downloaded `cloudflared` binary without understanding where it came from
@@ -72,6 +74,8 @@ codexpro start \
 - Do not commit printed connector URLs that include `codexpro_token`.
 - Do not commit Cloudflare tunnel tokens.
 - Use `--mode handoff` for planning workflows where ChatGPT should not edit source files.
+- Preview local handoff execution with `codexpro execute-handoff --dry-run` before running an unfamiliar adapter or custom command.
+- Keep `execute-handoff` local. Do not wrap it in a remote MCP tool unless you add a stronger approval and sandbox story.
 - Use default agent mode only with trusted ChatGPT sessions and repo-specific roots.
 - Use `--bash full` only for trusted local repos.
 - Prefer a repo-specific `--root` instead of `--allow-home`.

@@ -23,6 +23,7 @@
       </a>
       <nav aria-label="Primary navigation">
         <a href="#quickstart">Start</a>
+        <a href="#execute">Execute</a>
         <a href="#ngrok">ngrok</a>
         <a href="#cloudflare">Cloudflare</a>
         <a href="#reference">Docs</a>
@@ -135,6 +136,39 @@ codexpro setup</code>
           <div>
             <small>Best account fit</small>
             <strong>ChatGPT Plus or Pro with Apps / Developer Mode access. Free and Go accounts do not expose this app flow in current testing.</strong>
+          </div>
+        </div>
+      </section>
+
+      <section id="execute" class="section two-col">
+        <div>
+          <p class="eyebrow">Planner to executor</p>
+          <h2>Let ChatGPT plan, then run a local agent on your machine.</h2>
+          <p>
+            Handoff mode keeps ChatGPT planning-only. ChatGPT writes <code>.ai-bridge/current-plan.md</code>, then you decide whether to run a local implementation agent from your terminal.
+          </p>
+          <p>
+            <code>codexpro execute-handoff</code> runs the saved plan through OpenCode, Pi, Codex, or a custom command, then collects status, stdout/stderr excerpts, and the final git diff back into <code>.ai-bridge</code> for ChatGPT review.
+          </p>
+        </div>
+        <div class="command-stack">
+          <div>
+            <small>Preview first</small>
+            <pre><code>codexpro execute-handoff --agent opencode --model provider/model --dry-run</code></pre>
+          </div>
+          <div>
+            <small>Run locally</small>
+            <pre><code>codexpro execute-handoff --agent opencode --model provider/model</code></pre>
+          </div>
+          <div>
+            <small>Custom agent</small>
+            <pre><code>codexpro execute-handoff --agent custom --command "my-agent --task-file {{plan_file}}"</code></pre>
+          </div>
+          <div>
+            <small>Result files</small>
+            <pre><code>.ai-bridge/agent-status.md
+.ai-bridge/implementation-diff.patch
+.ai-bridge/execution-log.jsonl</code></pre>
           </div>
         </div>
       </section>
@@ -390,6 +424,7 @@ codexpro settings delete --yes</code></pre>
             <span>read_handoff</span>
             <span>export_pro_context</span>
             <span>handoff_to_codex</span>
+            <span>handoff_to_agent</span>
           </div>
         </div>
 
@@ -413,6 +448,11 @@ codexpro settings delete --yes</code></pre>
             <small>Stable URL rule</small>
             <h3>One URL needs one reserved hostname</h3>
             <p>Cloudflare quick tunnels change on restart. Use an ngrok free dev domain or Cloudflare named tunnel when you want one ChatGPT app URL.</p>
+          </article>
+          <article>
+            <small>Local executor</small>
+            <h3>Execution stays on your machine</h3>
+            <p><code>execute-handoff</code> is a terminal command, not a remote MCP tool. Use <code>--dry-run</code> before running unfamiliar agents or custom commands.</p>
           </article>
         </div>
 
