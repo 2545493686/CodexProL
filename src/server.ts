@@ -208,12 +208,23 @@ function displayAgentName(agent: string, agentName?: unknown): string {
   return agent;
 }
 
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
 function agentCommandHint(agent: string, planPath: string, model?: string): string {
-  const modelArg = model ? ` --model ${model}` : " --model <provider/model>";
-  if (agent === "opencode") return `opencode run${modelArg} "$(cat ${planPath})"`;
-  if (agent === "pi") return `pi run${modelArg} "$(cat ${planPath})"`;
+  const modelArg = model ? ` --model ${shellQuote(model)}` : " --model '<provider/model>'";
+  const quotedPlanPath = shellQuote(planPath);
+  if (agent === "opencode") return `opencode run${modelArg} "$(cat ${quotedPlanPath})"`;
+  if (agent === "pi") return `pi run${modelArg} "$(cat ${quotedPlanPath})"`;
   if (agent === "codex") return `Read ${planPath} and execute it in small, reviewable steps.`;
   return `Run your local implementation agent manually with ${planPath} as the task input.`;
+}
+
+async function readRawTextFileBounded(config: CodexProConfig, guard: PathGuard, workspace: Workspace, filePath: string): Promise<string> {
+  const resolved = guard.resolve(workspace, filePath);
+  await guard.assertTextFile(resolved.absPath, config.maxReadBytes);
+  return fsp.readFile(resolved.absPath, "utf8");
 }
 
 function buildAgentPlanBody(options: {
@@ -301,8 +312,7 @@ async function writeAgentHandoff(
 
   let content = body;
   if (options.append) {
-    const resolved = guard.resolve(workspace, planPath);
-    const raw = await fsp.readFile(resolved.absPath, "utf8");
+    const raw = await readRawTextFileBounded(config, guard, workspace, planPath);
     content = `${raw.trimEnd()}\n\n---\n\n${body}`;
   }
 

@@ -1,17 +1,22 @@
-const SECRET_VALUE_PATTERN = /\b(?:sk-[A-Za-z0-9_-]+|[A-Za-z0-9_]*(?:TOKEN|SECRET|PASSWORD|PRIVATE_KEY)[A-Za-z0-9_]*\s*=\s*[^\s]+)/gi;
+const OPENAI_SECRET_PATTERN = /\bsk-[A-Za-z0-9_-]{10,}\b/g;
+const SECRET_ASSIGNMENT_PATTERN = /\b[A-Za-z0-9_]*(?:API[_-]?KEY|TOKEN|SECRET|PASSWORD|PRIVATE[_-]?KEY)[A-Za-z0-9_]*\s*=\s*(?:"[^"\r\n]{12,}"|'[^'\r\n]{12,}'|`[^`\r\n]{12,}`|[A-Za-z0-9_./+=-]{20,})/gi;
+const SECRET_PATTERNS = [OPENAI_SECRET_PATTERN, SECRET_ASSIGNMENT_PATTERN];
 
 export function hasSecretValue(text: string): boolean {
-  SECRET_VALUE_PATTERN.lastIndex = 0;
-  let match: RegExpExecArray | null;
-  while ((match = SECRET_VALUE_PATTERN.exec(text)) !== null) {
-    if (!isPlaceholderSecret(match[0])) return true;
+  for (const pattern of SECRET_PATTERNS) {
+    pattern.lastIndex = 0;
+    let match: RegExpExecArray | null;
+    while ((match = pattern.exec(text)) !== null) {
+      if (!isPlaceholderSecret(match[0])) return true;
+    }
   }
   return false;
 }
 
 export function redactSensitiveText(text: string): string {
-  SECRET_VALUE_PATTERN.lastIndex = 0;
-  return text.replace(SECRET_VALUE_PATTERN, (match) => isPlaceholderSecret(match) ? match : "[REDACTED_SECRET]");
+  return text
+    .replace(SECRET_ASSIGNMENT_PATTERN, (match) => isPlaceholderSecret(match) ? match : redactSecretAssignment(match))
+    .replace(OPENAI_SECRET_PATTERN, (match) => isPlaceholderSecret(match) ? match : "[REDACTED_SECRET]");
 }
 
 export function redactStructured<T>(value: T, depth = 0): T {
@@ -34,7 +39,17 @@ function isPlaceholderSecret(value: string): boolean {
     normalized.includes("replace-me") ||
     normalized.includes("your-api-key-here") ||
     normalized.includes("<openai_api_key>") ||
+    normalized.includes("process.env.") ||
+    normalized.includes("import.meta.env.") ||
+    normalized.includes("os.environ") ||
+    normalized.includes("getenv(") ||
     normalized === "sk-..." ||
     normalized.endsWith("=sk-...")
   );
+}
+
+function redactSecretAssignment(value: string): string {
+  const index = value.indexOf("=");
+  if (index < 0) return "[REDACTED_SECRET]";
+  return `${value.slice(0, index).trimEnd()}= [REDACTED_SECRET]`;
 }

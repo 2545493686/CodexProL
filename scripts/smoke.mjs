@@ -133,6 +133,19 @@ if (secretPayload.includes('sk-realSecretValue123') || !secretPayload.includes('
   throw new Error('read did not redact secret-looking content');
 }
 await expectToolError('write', { workspace_id: ws, path: 'notes.md', content: 'OPENAI_API_KEY=sk-realSecretValue123\n' }, /Secret-looking content is blocked/);
+await client.request('tools/call', {
+  name: 'write',
+  arguments: {
+    workspace_id: ws,
+    path: 'env-ref.js',
+    content: 'const TOKEN = process.env.TOKEN;\nconst OPENAI_API_KEY = process.env.OPENAI_API_KEY;\nconst apiToken = getToken();\n'
+  }
+});
+const envRefRead = await client.request('tools/call', { name: 'read', arguments: { workspace_id: ws, path: 'env-ref.js' } });
+const envRefPayload = JSON.stringify(envRefRead);
+if (envRefPayload.includes('[REDACTED_SECRET]')) {
+  throw new Error('env-var token references were incorrectly redacted as literal secrets');
+}
 const symlinkRead = await client.request('tools/call', { name: 'read', arguments: { workspace_id: ws, path: 'secret-link.txt' } });
 if (!symlinkRead.isError) throw new Error('symlink escape read was not blocked');
 await client.request('tools/call', { name: 'edit', arguments: { workspace_id: ws, path: 'demo.txt', old_text: 'read\nread', new_text: 'read\nwrite' } });
@@ -159,6 +172,23 @@ const agentHandoff = await client.request('tools/call', {
   }
 });
 if (agentHandoff.structuredContent.agent !== 'opencode') throw new Error('handoff_to_agent did not preserve target agent');
+const escapedHandoff = await client.request('tools/call', {
+  name: 'handoff_to_agent',
+  arguments: {
+    workspace_id: ws,
+    agent: 'opencode',
+    model: 'foo; touch /tmp/pwned',
+    title: 'Escaped model plan',
+    plan: '- Verify shell hints quote model names.'
+  }
+});
+const escapedPrompt = escapedHandoff.content?.find?.((part) => part.type === 'text')?.text ?? '';
+if (!escapedPrompt.includes("--model 'foo; touch /tmp/pwned'")) {
+  throw new Error(`handoff_to_agent did not shell-quote the model hint: ${escapedPrompt}`);
+}
+if (escapedPrompt.includes('--model foo; touch')) {
+  throw new Error(`handoff_to_agent exposed an unquoted model hint: ${escapedPrompt}`);
+}
 for (const bridgeFile of ['agent-status.md', 'implementation-diff.patch', 'execution-log.jsonl']) {
   await fs.stat(path.join(tmp, '.ai-bridge', bridgeFile));
 }
@@ -169,5 +199,13 @@ for (const expectedFile of ['.ai-bridge/agent-status.md', '.ai-bridge/implementa
   }
 }
 await client.request('tools/call', { name: 'handoff_to_codex', arguments: { workspace_id: ws, title: 'Smoke Codex plan', plan: '- Verify demo.txt contains write.', append: true } });
+await fs.writeFile(path.join(tmp, '.ai-bridge', 'current-plan.md'), 'x'.repeat(190000), 'utf8');
+await expectToolError('handoff_to_agent', {
+  workspace_id: ws,
+  agent: 'opencode',
+  title: 'Oversized append plan',
+  plan: '- This append should fail before loading the existing plan.',
+  append: true
+}, /File is too large/);
 client.close();
 console.log('✓ smoke test passed');

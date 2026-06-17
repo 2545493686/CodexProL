@@ -5,6 +5,9 @@
 - Added `handoff_to_agent` for file-based handoffs to Codex, OpenCode, Pi, or custom local implementation agents without executing local commands.
 - Extended `.ai-bridge` with generic `agent-status.md`, `implementation-diff.patch`, and `execution-log.jsonl` files.
 - Updated `read_handoff`, `codex_context`, Pro apply logging, docs, and smoke coverage for generic agent handoffs.
+- Fixed secret detection so benign env-var references like `process.env.TOKEN` are not blocked or redacted as literal secrets.
+- Shell-quoted generated agent command hints so model names cannot inject extra shell tokens.
+- Bounded append-mode handoff reads with the configured text-file size guard.
 
 ## 0.27.1
 
