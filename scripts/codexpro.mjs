@@ -2344,7 +2344,12 @@ function writeControlPrompt() {
 }
 
 function runControlPanel(details) {
-  if (!process.stdin.isTTY) return new Promise(() => {});
+  if (!process.stdin.isTTY) {
+    const keepAlive = setInterval(() => {}, 2 ** 31 - 1);
+    return new Promise(() => {
+      keepAlive.ref();
+    });
+  }
 
   writeControlPrompt();
 
