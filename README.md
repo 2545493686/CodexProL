@@ -2,10 +2,10 @@
   <img src="docs/favicon.svg" width="72" height="72" alt="CodexPro logo">
 </p>
 
-<h1 align="center">CodexPro</h1>
+<h1 align="center">CodexProL</h1>
 
 <p align="center">
-  Let ChatGPT web see your Codex-style repo context and act like a local coding agent.
+  A personal fork of CodexPro with a simpler ChatGPT tool-card experience.
 </p>
 
 <p align="center">
@@ -32,6 +32,20 @@
   ·
   <a href="SECURITY.md">Security</a>
 </p>
+
+## About this fork
+
+CodexProL is a public fork of [rebel0789/codexpro](https://github.com/rebel0789/codexpro), forked from the `codexpro` package version `0.28.5`.
+
+This fork keeps the upstream project structure and license, while adding a few local-use improvements:
+
+- Simplified ChatGPT tool-card rendering into compact plain text boxes.
+- Removed verbose tool-card headers and large inline previews from normal ChatGPT output.
+- Summarized file, diff, workspace, handoff, and search results instead of expanding full content by default.
+- Kept terminal cards focused on the command, exit code, and final output lines.
+- Added a small non-TTY keep-alive fix for the local control process.
+
+For the original project, documentation, issues, and upstream updates, see [rebel0789/codexpro](https://github.com/rebel0789/codexpro).
 
 ## Installation
 
